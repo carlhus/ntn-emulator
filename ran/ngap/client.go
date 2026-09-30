@@ -7,10 +7,9 @@ import (
 
 	"ntn-emulator/ran/gtp"
 
-	"github.com/free5gc/aper"
-	"github.com/free5gc/ngap"
-	"github.com/free5gc/ngap/ngapConvert"
-	"github.com/free5gc/ngap/ngapType"
+	"github.com/free5gc/ngap/aper"
+	"github.com/free5gc/ngap/ie"
+	"github.com/free5gc/ngap/message"
 	"github.com/free5gc/sctp"
 
 	"test"
@@ -89,12 +88,12 @@ func (c *NGAPClient) GetConnection() *sctp.SCTPConn {
 }
 
 // SendInitialUEMessage sends Initial UE Message (for first Registration Request)
-func (c *NGAPClient) SendInitialUEMessage(ranUeNgapID int64, nasPdu []byte, plmnID ngapType.PLMNIdentity, tai ngapType.TAI) error {
+func (c *NGAPClient) SendInitialUEMessage(ranUeNgapID int64, nasPdu []byte, plmnID ie.PLMNIdentity, tai ie.TAI) error {
 	// Build NGAP Initial UE Message with correct RRC Establishment Cause for MO-signalling
 	pdu := buildInitialUEMessageForRegistration(ranUeNgapID, nasPdu, plmnID, tai)
 
 	//Encode NGAP PDU
-	ngapMsg, err := ngap.Encoder(pdu)
+	ngapMsg, err := pdu.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("failed to encode Initial UE Message: %w", err)
 	}
@@ -110,7 +109,7 @@ func (c *NGAPClient) SendUplinkNASTransport(amfUeNgapID, ranUeNgapID int64, nasP
 	pdu := ngapTestpacket.BuildUplinkNasTransport(amfUeNgapID, ranUeNgapID, nasPdu)
 
 	// Encode NGAP PDU
-	ngapMsg, err := ngap.Encoder(pdu)
+	ngapMsg, err := pdu.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("failed to encode Uplink NAS Transport: %w", err)
 	}
@@ -154,119 +153,54 @@ func (c *NGAPClient) ReceiveNASPDUWithType() (nasPdu []byte, amfUeNgapID *int64,
 	}
 
 	// Decode NGAP PDU
-	pdu, err := ngap.Decoder(recvBuf[:n])
+	pdu, err := message.Parse(recvBuf[:n])
 	if err != nil {
 		return nil, nil, nil, false, fmt.Errorf("failed to decode NGAP PDU: %w", err)
 	}
 
 	// Extract NAS PDU from Downlink NAS Transport or Initial Context Setup Request
-	if pdu.Present == ngapType.NGAPPDUPresentInitiatingMessage {
-		// Check for Downlink NAS Transport
-		if pdu.InitiatingMessage.Value.Present == ngapType.InitiatingMessagePresentDownlinkNASTransport {
-			downlinkNAS := pdu.InitiatingMessage.Value.DownlinkNASTransport
-			if downlinkNAS == nil {
-				return nil, nil, nil, false, fmt.Errorf("downlink NAS transport is nil")
-			}
-
-			// Extract IEs
-			for _, ie := range downlinkNAS.ProtocolIEs.List {
-				switch ie.Id.Value {
-				case ngapType.ProtocolIEIDAMFUENGAPID:
-					if ie.Value.AMFUENGAPID != nil {
-						id := ie.Value.AMFUENGAPID.Value
-						amfUeNgapID = &id
-					}
-				case ngapType.ProtocolIEIDRANUENGAPID:
-					if ie.Value.RANUENGAPID != nil {
-						id := ie.Value.RANUENGAPID.Value
-						ranUeNgapID = &id
-					}
-				case ngapType.ProtocolIEIDNASPDU:
-					if ie.Value.NASPDU != nil {
-						nasPdu = ie.Value.NASPDU.Value
-					}
-				}
-			}
-
-			if nasPdu == nil {
-				return nil, nil, nil, false, fmt.Errorf("NAS PDU not found in Downlink NAS Transport")
-			}
-
-			return nasPdu, amfUeNgapID, ranUeNgapID, false, nil
+	switch msg := pdu.(type) {
+	case *message.DownlinkNASTransport:
+		amfUeNgapID, ranUeNgapID = ngapIDs(msg.AMFUENGAPID, msg.RANUENGAPID)
+		if msg.NASPDU == nil {
+			return nil, nil, nil, false, fmt.Errorf("NAS PDU not found in Downlink NAS Transport")
 		}
 
-		// Check for Initial Context Setup Request
-		if pdu.InitiatingMessage.Value.Present == ngapType.InitiatingMessagePresentInitialContextSetupRequest {
-			initialContextSetup := pdu.InitiatingMessage.Value.InitialContextSetupRequest
-			if initialContextSetup == nil {
-				return nil, nil, nil, false, fmt.Errorf("initial context setup request is nil")
-			}
+		return msg.NASPDU.Value, amfUeNgapID, ranUeNgapID, false, nil
 
-			// Extract IEs
-			for _, ie := range initialContextSetup.ProtocolIEs.List {
-				switch ie.Id.Value {
-				case ngapType.ProtocolIEIDAMFUENGAPID:
-					if ie.Value.AMFUENGAPID != nil {
-						id := ie.Value.AMFUENGAPID.Value
-						amfUeNgapID = &id
-					}
-				case ngapType.ProtocolIEIDRANUENGAPID:
-					if ie.Value.RANUENGAPID != nil {
-						id := ie.Value.RANUENGAPID.Value
-						ranUeNgapID = &id
-					}
-				case ngapType.ProtocolIEIDNASPDU:
-					if ie.Value.NASPDU != nil {
-						nasPdu = ie.Value.NASPDU.Value
-					}
-				}
-			}
-
-			if nasPdu == nil {
-				return nil, nil, nil, false, fmt.Errorf("NAS PDU not found in Initial Context Setup Request")
-			}
-
-			fmt.Println("DEBUG: Received Initial Context Setup Request with NAS PDU")
-			return nasPdu, amfUeNgapID, ranUeNgapID, true, nil
+	case *message.InitialContextSetupRequest:
+		amfUeNgapID, ranUeNgapID = ngapIDs(msg.AMFUENGAPID, msg.RANUENGAPID)
+		if msg.NASPDU == nil {
+			return nil, nil, nil, false, fmt.Errorf("NAS PDU not found in Initial Context Setup Request")
 		}
 
-		// Check for PDU Session Resource Setup Request
-		if pdu.InitiatingMessage.Value.Present == ngapType.InitiatingMessagePresentPDUSessionResourceSetupRequest {
-			pduSessionSetup := pdu.InitiatingMessage.Value.PDUSessionResourceSetupRequest
-			if pduSessionSetup == nil {
-				return nil, nil, nil, false, fmt.Errorf("PDU session resource setup request is nil")
-			}
+		fmt.Println("DEBUG: Received Initial Context Setup Request with NAS PDU")
+		return msg.NASPDU.Value, amfUeNgapID, ranUeNgapID, true, nil
 
-			// Extract IEs
-			for _, ie := range pduSessionSetup.ProtocolIEs.List {
-				switch ie.Id.Value {
-				case ngapType.ProtocolIEIDAMFUENGAPID:
-					if ie.Value.AMFUENGAPID != nil {
-						id := ie.Value.AMFUENGAPID.Value
-						amfUeNgapID = &id
-					}
-				case ngapType.ProtocolIEIDRANUENGAPID:
-					if ie.Value.RANUENGAPID != nil {
-						id := ie.Value.RANUENGAPID.Value
-						ranUeNgapID = &id
-					}
-				case ngapType.ProtocolIEIDNASPDU:
-					if ie.Value.NASPDU != nil {
-						nasPdu = ie.Value.NASPDU.Value
-					}
-				}
-			}
-
-			if nasPdu == nil {
-				return nil, nil, nil, false, fmt.Errorf("NAS PDU not found in PDU Session Resource Setup Request")
-			}
-
-			fmt.Println("DEBUG: Received PDU Session Resource Setup Request with NAS PDU")
-			return nasPdu, amfUeNgapID, ranUeNgapID, false, nil
+	case *message.PDUSessionResourceSetupRequest:
+		amfUeNgapID, ranUeNgapID = ngapIDs(msg.AMFUENGAPID, msg.RANUENGAPID)
+		if msg.NASPDU == nil {
+			return nil, nil, nil, false, fmt.Errorf("NAS PDU not found in PDU Session Resource Setup Request")
 		}
+
+		fmt.Println("DEBUG: Received PDU Session Resource Setup Request with NAS PDU")
+		return msg.NASPDU.Value, amfUeNgapID, ranUeNgapID, false, nil
 	}
 
-	return nil, nil, nil, false, fmt.Errorf("unexpected NGAP message type (not Downlink NAS Transport or Initial Context Setup)")
+	return nil, nil, nil, false, fmt.Errorf("unexpected NGAP message type %T (not Downlink NAS Transport or Initial Context Setup)", pdu)
+}
+
+// ngapIDs returns the AMF/RAN UE NGAP ID values of the given IEs, or nil for absent IEs
+func ngapIDs(amfIE *ie.AMFUENGAPID, ranIE *ie.RANUENGAPID) (amfUeNgapID *int64, ranUeNgapID *int64) {
+	if amfIE != nil {
+		id := amfIE.Value
+		amfUeNgapID = &id
+	}
+	if ranIE != nil {
+		id := ranIE.Value
+		ranUeNgapID = &id
+	}
+	return amfUeNgapID, ranUeNgapID
 }
 
 // getSCTPAddresses resolves and returns SCTP addresses for AMF and RAN
@@ -321,20 +255,15 @@ func (c *NGAPClient) ReceivePDUSessionResourceSetupRequest() (*PDUSessionSetupIn
 	}
 
 	// Decode NGAP PDU
-	pdu, err := ngap.Decoder(recvBuf[:n])
+	pdu, err := message.Parse(recvBuf[:n])
 	if err != nil {
 		return nil, fmt.Errorf("failed to decode NGAP PDU: %w", err)
 	}
 
 	// Verify it's PDU Session Resource Setup Request
-	if pdu.Present != ngapType.NGAPPDUPresentInitiatingMessage ||
-		pdu.InitiatingMessage.Value.Present != ngapType.InitiatingMessagePresentPDUSessionResourceSetupRequest {
-		return nil, fmt.Errorf("expected PDU Session Resource Setup Request, got different message")
-	}
-
-	setupReq := pdu.InitiatingMessage.Value.PDUSessionResourceSetupRequest
-	if setupReq == nil {
-		return nil, fmt.Errorf("PDU Session Resource Setup Request is nil")
+	setupReq, ok := pdu.(*message.PDUSessionResourceSetupRequest)
+	if !ok {
+		return nil, fmt.Errorf("expected PDU Session Resource Setup Request, got %T", pdu)
 	}
 
 	info := &PDUSessionSetupInfo{
@@ -342,29 +271,29 @@ func (c *NGAPClient) ReceivePDUSessionResourceSetupRequest() (*PDUSessionSetupIn
 	}
 
 	// Extract IEs from PDU Session Resource Setup List
-	for _, ie := range setupReq.ProtocolIEs.List {
-		if ie.Id.Value == ngapType.ProtocolIEIDPDUSessionResourceSetupListSUReq {
-			for _, item := range ie.Value.PDUSessionResourceSetupListSUReq.List {
-				// Extract PDU Session ID
+	if setupReq.PDUSessionResourceSetupListSUReq != nil {
+		for _, item := range setupReq.PDUSessionResourceSetupListSUReq.List {
+			// Extract PDU Session ID
+			if item.PDUSessionID != nil {
 				info.PDUSessionID = uint8(item.PDUSessionID.Value)
+			}
 
-				// Extract NAS PDU if present
-				if item.PDUSessionNASPDU != nil {
-					info.NASPdu = item.PDUSessionNASPDU.Value
+			// Extract NAS PDU if present
+			if item.PDUSessionNASPDU != nil {
+				info.NASPdu = item.PDUSessionNASPDU.Value
+			}
+
+			// Decode PDU Session Resource Setup Request Transfer
+			if item.PDUSessionResourceSetupRequestTransfer != nil {
+				transfer, err := c.decodePDUSessionResourceSetupRequestTransfer(
+					*item.PDUSessionResourceSetupRequestTransfer)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode transfer: %w", err)
 				}
 
-				// Decode PDU Session Resource Setup Request Transfer
-				if item.PDUSessionResourceSetupRequestTransfer != nil {
-					transfer, err := c.decodePDUSessionResourceSetupRequestTransfer(
-						item.PDUSessionResourceSetupRequestTransfer)
-					if err != nil {
-						return nil, fmt.Errorf("failed to decode transfer: %w", err)
-					}
-
-					info.UEIPAddress = transfer.UEIPAddress
-					info.UPFTEID = transfer.UPFTEID
-					info.UPFAddress = transfer.UPFAddress
-				}
+				info.UEIPAddress = transfer.UEIPAddress
+				info.UPFTEID = transfer.UPFTEID
+				info.UPFAddress = transfer.UPFAddress
 			}
 		}
 	}
@@ -374,42 +303,40 @@ func (c *NGAPClient) ReceivePDUSessionResourceSetupRequest() (*PDUSessionSetupIn
 
 // decodePDUSessionResourceSetupRequestTransfer decodes the transfer IE
 func (c *NGAPClient) decodePDUSessionResourceSetupRequestTransfer(transferBytes []byte) (*PDUSessionSetupInfo, error) {
-	var transfer ngapType.PDUSessionResourceSetupRequestTransfer
-	err := aper.UnmarshalWithParams(transferBytes, &transfer, "valueExt")
+	var transfer ie.PDUSessionResourceSetupRequestTransfer
+	err := ie.UnmarshalBinary(transferBytes, &transfer)
 	if err != nil {
 		return nil, fmt.Errorf("APER unmarshal failed: %w", err)
 	}
 
 	info := &PDUSessionSetupInfo{}
 
-	for _, ie := range transfer.ProtocolIEs.List {
-		switch ie.Id.Value {
-		case ngapType.ProtocolIEIDULNGUUPTNLInformation:
-			// Extract UPF address and TEID
-			if ie.Value.ULNGUUPTNLInformation != nil &&
-				ie.Value.ULNGUUPTNLInformation.GTPTunnel != nil {
-				tunnel := ie.Value.ULNGUUPTNLInformation.GTPTunnel
+	if transfer.ProtocolIEs == nil {
+		return info, nil
+	}
 
-				// Extract TEID
-				teid, err := gtp.ParseTEID(tunnel.GTPTEID.Value)
-				if err != nil {
-					return nil, fmt.Errorf("failed to parse TEID: %w", err)
-				}
-				info.UPFTEID = teid
+	for _, item := range transfer.ProtocolIEs.List {
+		// Extract UPF address and TEID
+		if item.ULNGUUPTNLInformation == nil {
+			continue
+		}
+		tunnel, ok := item.ULNGUUPTNLInformation.Choice.(*ie.GTPTunnel)
+		if !ok || tunnel.GTPTEID == nil || tunnel.TransportLayerAddress == nil {
+			continue
+		}
 
-				// Extract UPF IP address
-				ipBytes := tunnel.TransportLayerAddress.Value.Bytes
-				if len(ipBytes) >= 4 {
-					info.UPFAddress = fmt.Sprintf("%d.%d.%d.%d",
-						ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3])
-				}
-			}
+		// Extract TEID
+		teid, err := gtp.ParseTEID(tunnel.GTPTEID.Value)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse TEID: %w", err)
+		}
+		info.UPFTEID = teid
 
-		case ngapType.ProtocolIEIDPDUSessionType:
-			// PDU Session Type (IPv4, IPv6, etc.)
-
-		case ngapType.ProtocolIEIDQosFlowSetupRequestList:
-			// QoS Flow information
+		// Extract UPF IP address
+		ipBytes := tunnel.TransportLayerAddress.Value.Bytes
+		if len(ipBytes) >= 4 {
+			info.UPFAddress = fmt.Sprintf("%d.%d.%d.%d",
+				ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3])
 		}
 	}
 
@@ -424,28 +351,23 @@ func (c *NGAPClient) ReceiveUEContextReleaseCommand() (amfUeNgapID int64, ranUeN
 		return 0, 0, fmt.Errorf("failed to receive NGAP message: %w", err)
 	}
 
-	pdu, err := ngap.Decoder(recvBuf[:n])
+	pdu, err := message.Parse(recvBuf[:n])
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to decode NGAP PDU: %w", err)
 	}
 
-	if pdu.Present != ngapType.NGAPPDUPresentInitiatingMessage ||
-		pdu.InitiatingMessage.Value.Present != ngapType.InitiatingMessagePresentUEContextReleaseCommand {
-		return 0, 0, fmt.Errorf("expected UEContextReleaseCommand, got different message")
+	relCmd, ok := pdu.(*message.UEContextReleaseCommand)
+	if !ok {
+		return 0, 0, fmt.Errorf("expected UEContextReleaseCommand, got %T", pdu)
 	}
 
-	relCmd := pdu.InitiatingMessage.Value.UEContextReleaseCommand
-	for _, ie := range relCmd.ProtocolIEs.List {
-		switch ie.Id.Value {
-		case ngapType.ProtocolIEIDUENGAPIDs:
-			if ie.Value.UENGAPIDs != nil {
-				switch ie.Value.UENGAPIDs.Present {
-				case ngapType.UENGAPIDsPresentUENGAPIDPair:
-					if ie.Value.UENGAPIDs.UENGAPIDPair != nil {
-						amfUeNgapID = ie.Value.UENGAPIDs.UENGAPIDPair.AMFUENGAPID.Value
-						ranUeNgapID = ie.Value.UENGAPIDs.UENGAPIDPair.RANUENGAPID.Value
-					}
-				}
+	if relCmd.UENGAPIDs != nil {
+		if pair, ok := relCmd.UENGAPIDs.Choice.(*ie.UENGAPIDPair); ok {
+			if pair.AMFUENGAPID != nil {
+				amfUeNgapID = pair.AMFUENGAPID.Value
+			}
+			if pair.RANUENGAPID != nil {
+				ranUeNgapID = pair.RANUENGAPID.Value
 			}
 		}
 	}
@@ -455,45 +377,18 @@ func (c *NGAPClient) ReceiveUEContextReleaseCommand() (amfUeNgapID int64, ranUeN
 
 // SendUEContextReleaseComplete sends UEContextReleaseComplete to AMF
 func (c *NGAPClient) SendUEContextReleaseComplete(amfUeNgapID, ranUeNgapID int64) error {
-	pdu := buildUEContextReleaseCompletePDU(amfUeNgapID, ranUeNgapID)
+	pdu := &message.UEContextReleaseComplete{
+		AMFUENGAPID: &ie.AMFUENGAPID{Value: amfUeNgapID},
+		RANUENGAPID: &ie.RANUENGAPID{Value: ranUeNgapID},
+	}
 
-	ngapMsg, err := ngap.Encoder(pdu)
+	ngapMsg, err := pdu.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("failed to encode UEContextReleaseComplete: %w", err)
 	}
 
 	_, err = c.Send(ngapMsg)
 	return err
-}
-
-// buildUEContextReleaseCompletePDU builds the NGAP PDU for UEContextReleaseComplete
-func buildUEContextReleaseCompletePDU(amfUeNgapID, ranUeNgapID int64) ngapType.NGAPPDU {
-	var pdu ngapType.NGAPPDU
-	pdu.Present = ngapType.NGAPPDUPresentSuccessfulOutcome
-	pdu.SuccessfulOutcome = new(ngapType.SuccessfulOutcome)
-	pdu.SuccessfulOutcome.ProcedureCode.Value = ngapType.ProcedureCodeUEContextRelease
-	pdu.SuccessfulOutcome.Criticality.Value = ngapType.CriticalityPresentReject
-	pdu.SuccessfulOutcome.Value.Present = ngapType.SuccessfulOutcomePresentUEContextReleaseComplete
-	pdu.SuccessfulOutcome.Value.UEContextReleaseComplete = new(ngapType.UEContextReleaseComplete)
-
-	releaseComplete := pdu.SuccessfulOutcome.Value.UEContextReleaseComplete
-	releaseComplete.ProtocolIEs.List = make([]ngapType.UEContextReleaseCompleteIEs, 2)
-
-	// AMF UE NGAP ID
-	releaseComplete.ProtocolIEs.List[0].Id.Value = ngapType.ProtocolIEIDAMFUENGAPID
-	releaseComplete.ProtocolIEs.List[0].Criticality.Value = ngapType.CriticalityPresentIgnore
-	releaseComplete.ProtocolIEs.List[0].Value.Present = ngapType.UEContextReleaseCompleteIEsPresentAMFUENGAPID
-	releaseComplete.ProtocolIEs.List[0].Value.AMFUENGAPID = new(ngapType.AMFUENGAPID)
-	releaseComplete.ProtocolIEs.List[0].Value.AMFUENGAPID.Value = amfUeNgapID
-
-	// RAN UE NGAP ID
-	releaseComplete.ProtocolIEs.List[1].Id.Value = ngapType.ProtocolIEIDRANUENGAPID
-	releaseComplete.ProtocolIEs.List[1].Criticality.Value = ngapType.CriticalityPresentIgnore
-	releaseComplete.ProtocolIEs.List[1].Value.Present = ngapType.UEContextReleaseCompleteIEsPresentRANUENGAPID
-	releaseComplete.ProtocolIEs.List[1].Value.RANUENGAPID = new(ngapType.RANUENGAPID)
-	releaseComplete.ProtocolIEs.List[1].Value.RANUENGAPID.Value = ranUeNgapID
-
-	return pdu
 }
 
 // SendPDUSessionResourceSetupResponse sends PDU Session Resource Setup Response
@@ -505,10 +400,13 @@ func (c *NGAPClient) SendPDUSessionResourceSetupResponse(amfUeNgapID, ranUeNgapI
 // SendPDUSessionResourceSetupResponseWithIP sends PDU Session Resource Setup Response with custom gNB IP
 func (c *NGAPClient) SendPDUSessionResourceSetupResponseWithIP(amfUeNgapID, ranUeNgapID int64, pduSessionID uint8, gnbTEID uint32, gnbN3IP string) error {
 	// Build PDU Session Resource Setup Response manually
-	pdu := buildPDUSessionResourceSetupResponsePDU(amfUeNgapID, ranUeNgapID, pduSessionID, gnbTEID, gnbN3IP)
+	pdu, err := buildPDUSessionResourceSetupResponsePDU(amfUeNgapID, ranUeNgapID, pduSessionID, gnbTEID, gnbN3IP)
+	if err != nil {
+		return fmt.Errorf("failed to build PDU session resource setup response: %w", err)
+	}
 
 	// Encode NGAP PDU
-	ngapMsg, err := ngap.Encoder(pdu)
+	ngapMsg, err := pdu.MarshalBinary()
 	if err != nil {
 		return fmt.Errorf("failed to encode PDU session resource setup response: %w", err)
 	}
@@ -519,153 +417,100 @@ func (c *NGAPClient) SendPDUSessionResourceSetupResponseWithIP(amfUeNgapID, ranU
 }
 
 // buildPDUSessionResourceSetupResponsePDU builds the NGAP PDU for PDU Session Resource Setup Response
-func buildPDUSessionResourceSetupResponsePDU(amfUeNgapID, ranUeNgapID int64, pduSessionID uint8, gnbTEID uint32, gnbIP string) ngapType.NGAPPDU {
-	// Create response PDU
-	pdu := ngapType.NGAPPDU{}
-	pdu.Present = ngapType.NGAPPDUPresentSuccessfulOutcome
-	pdu.SuccessfulOutcome = new(ngapType.SuccessfulOutcome)
-	pdu.SuccessfulOutcome.ProcedureCode.Value = ngapType.ProcedureCodePDUSessionResourceSetup
-	pdu.SuccessfulOutcome.Criticality.Value = ngapType.CriticalityPresentReject
-
-	pdu.SuccessfulOutcome.Value.Present = ngapType.SuccessfulOutcomePresentPDUSessionResourceSetupResponse
-	pdu.SuccessfulOutcome.Value.PDUSessionResourceSetupResponse = new(ngapType.PDUSessionResourceSetupResponse)
-
-	setupResp := pdu.SuccessfulOutcome.Value.PDUSessionResourceSetupResponse
-	setupResp.ProtocolIEs.List = make([]ngapType.PDUSessionResourceSetupResponseIEs, 3)
-
-	// IE 0: AMF UE NGAP ID
-	setupResp.ProtocolIEs.List[0].Id.Value = ngapType.ProtocolIEIDAMFUENGAPID
-	setupResp.ProtocolIEs.List[0].Criticality.Value = ngapType.CriticalityPresentIgnore
-	setupResp.ProtocolIEs.List[0].Value.Present = ngapType.PDUSessionResourceSetupResponseIEsPresentAMFUENGAPID
-	setupResp.ProtocolIEs.List[0].Value.AMFUENGAPID = new(ngapType.AMFUENGAPID)
-	setupResp.ProtocolIEs.List[0].Value.AMFUENGAPID.Value = amfUeNgapID
-
-	// IE 1: RAN UE NGAP ID
-	setupResp.ProtocolIEs.List[1].Id.Value = ngapType.ProtocolIEIDRANUENGAPID
-	setupResp.ProtocolIEs.List[1].Criticality.Value = ngapType.CriticalityPresentIgnore
-	setupResp.ProtocolIEs.List[1].Value.Present = ngapType.PDUSessionResourceSetupResponseIEsPresentRANUENGAPID
-	setupResp.ProtocolIEs.List[1].Value.RANUENGAPID = new(ngapType.RANUENGAPID)
-	setupResp.ProtocolIEs.List[1].Value.RANUENGAPID.Value = ranUeNgapID
-
-	// IE 2: PDU Session Resource Setup List
-	setupResp.ProtocolIEs.List[2].Id.Value = ngapType.ProtocolIEIDPDUSessionResourceSetupListSURes
-	setupResp.ProtocolIEs.List[2].Criticality.Value = ngapType.CriticalityPresentIgnore
-	setupResp.ProtocolIEs.List[2].Value.Present = ngapType.PDUSessionResourceSetupResponseIEsPresentPDUSessionResourceSetupListSURes
-	setupResp.ProtocolIEs.List[2].Value.PDUSessionResourceSetupListSURes = new(ngapType.PDUSessionResourceSetupListSURes)
-
-	// PDU Session Resource Setup Item
-	setupResp.ProtocolIEs.List[2].Value.PDUSessionResourceSetupListSURes.List = make([]ngapType.PDUSessionResourceSetupItemSURes, 1)
-	setupItem := &setupResp.ProtocolIEs.List[2].Value.PDUSessionResourceSetupListSURes.List[0]
-
-	setupItem.PDUSessionID.Value = int64(pduSessionID)
-
+func buildPDUSessionResourceSetupResponsePDU(amfUeNgapID, ranUeNgapID int64, pduSessionID uint8, gnbTEID uint32, gnbIP string) (*message.PDUSessionResourceSetupResponse, error) {
 	// Build PDU Session Resource Setup Response Transfer
 	transfer := buildPDUSessionResourceSetupResponseTransfer(gnbTEID, gnbIP)
-	transferBytes, _ := aper.MarshalWithParams(transfer, "valueExt")
-	setupItem.PDUSessionResourceSetupResponseTransfer = transferBytes
+	transferBytes, err := ie.MarshalBinary(&transfer)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode PDU session resource setup response transfer: %w", err)
+	}
+	transferOctets := aper.OctetString(transferBytes)
 
 	fmt.Printf("📤 NGAP: Sending PDU Session Resource Setup Response with gNB IP=%s, TEID=0x%08x\n", gnbIP, gnbTEID)
 
-	return pdu
+	return &message.PDUSessionResourceSetupResponse{
+		AMFUENGAPID: &ie.AMFUENGAPID{Value: amfUeNgapID},
+		RANUENGAPID: &ie.RANUENGAPID{Value: ranUeNgapID},
+		PDUSessionResourceSetupListSURes: &ie.PDUSessionResourceSetupListSURes{
+			List: []ie.PDUSessionResourceSetupItemSURes{
+				{
+					PDUSessionID:                            &ie.PDUSessionID{Value: int64(pduSessionID)},
+					PDUSessionResourceSetupResponseTransfer: &transferOctets,
+				},
+			},
+		},
+	}, nil
 }
 
 // buildPDUSessionResourceSetupResponseTransfer builds the transfer IE
-func buildPDUSessionResourceSetupResponseTransfer(gnbTEID uint32, gnbIP string) ngapType.PDUSessionResourceSetupResponseTransfer {
-	transfer := ngapType.PDUSessionResourceSetupResponseTransfer{}
-
-	// DL GTP Tunnel (gNB side)
-	transfer.DLQosFlowPerTNLInformation.UPTransportLayerInformation.Present = ngapType.UPTransportLayerInformationPresentGTPTunnel
-	transfer.DLQosFlowPerTNLInformation.UPTransportLayerInformation.GTPTunnel = new(ngapType.GTPTunnel)
-
-	// Set gNB IP address using ngapConvert (like free-ran-ue)
-	transfer.DLQosFlowPerTNLInformation.UPTransportLayerInformation.GTPTunnel.TransportLayerAddress = ngapConvert.IPAddressToNgap(gnbIP, "")
-
+func buildPDUSessionResourceSetupResponseTransfer(gnbTEID uint32, gnbIP string) ie.PDUSessionResourceSetupResponseTransfer {
 	// Set gNB TEID
 	teidBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(teidBytes, gnbTEID)
-	transfer.DLQosFlowPerTNLInformation.UPTransportLayerInformation.GTPTunnel.GTPTEID.Value = teidBytes
 
-	// Associated QoS Flow List (QFI=1)
-	transfer.DLQosFlowPerTNLInformation.AssociatedQosFlowList.List = make([]ngapType.AssociatedQosFlowItem, 1)
-	transfer.DLQosFlowPerTNLInformation.AssociatedQosFlowList.List[0].QosFlowIdentifier.Value = 1
+	return ie.PDUSessionResourceSetupResponseTransfer{
+		DLQosFlowPerTNLInformation: &ie.QosFlowPerTNLInformation{
+			// DL GTP Tunnel (gNB side)
+			UPTransportLayerInformation: &ie.UPTransportLayerInformation{
+				Choice: &ie.GTPTunnel{
+					TransportLayerAddress: IPv4ToTransportLayerAddress(gnbIP),
+					GTPTEID:               &ie.GTPTEID{Value: aper.OctetString(teidBytes)},
+				},
+			},
+			// Associated QoS Flow List (QFI=1)
+			AssociatedQosFlowList: &ie.AssociatedQosFlowList{
+				List: []ie.AssociatedQosFlowItem{
+					{QosFlowIdentifier: &ie.QosFlowIdentifier{Value: 1}},
+				},
+			},
+		},
+	}
+}
 
-	return transfer
+// IPv4ToTransportLayerAddress converts an IPv4 address string to an NGAP TransportLayerAddress (like free-ran-ue)
+func IPv4ToTransportLayerAddress(ipv4Addr string) *ie.TransportLayerAddress {
+	ip := net.ParseIP(ipv4Addr).To4()
+	if ip == nil {
+		return &ie.TransportLayerAddress{}
+	}
+	return &ie.TransportLayerAddress{
+		Value: aper.BitString{
+			Bytes:     []byte{ip[0], ip[1], ip[2], ip[3]},
+			BitLength: 32,
+		},
+	}
 }
 
 // buildInitialUEMessageForRegistration builds Initial UE Message with MO-Signalling RRC Establishment Cause
 // This is critical for AMF to properly initialize UE context with correct access type
-func buildInitialUEMessageForRegistration(ranUeNgapID int64, nasPdu []byte, plmnID ngapType.PLMNIdentity, tai ngapType.TAI) ngapType.NGAPPDU {
-	var pdu ngapType.NGAPPDU
-	pdu.Present = ngapType.NGAPPDUPresentInitiatingMessage
-	pdu.InitiatingMessage = new(ngapType.InitiatingMessage)
-
-	initiatingMessage := pdu.InitiatingMessage
-	initiatingMessage.ProcedureCode.Value = ngapType.ProcedureCodeInitialUEMessage
-	initiatingMessage.Criticality.Value = ngapType.CriticalityPresentIgnore
-
-	initiatingMessage.Value.Present = ngapType.InitiatingMessagePresentInitialUEMessage
-	initiatingMessage.Value.InitialUEMessage = new(ngapType.InitialUEMessage)
-
-	initialUEMessage := initiatingMessage.Value.InitialUEMessage
-	initialUEMessageIEs := &initialUEMessage.ProtocolIEs
-
-	// RAN UE NGAP ID
-	ie := ngapType.InitialUEMessageIEs{}
-	ie.Id.Value = ngapType.ProtocolIEIDRANUENGAPID
-	ie.Criticality.Value = ngapType.CriticalityPresentReject
-	ie.Value.Present = ngapType.InitialUEMessageIEsPresentRANUENGAPID
-	ie.Value.RANUENGAPID = new(ngapType.RANUENGAPID)
-	ie.Value.RANUENGAPID.Value = ranUeNgapID
-	initialUEMessageIEs.List = append(initialUEMessageIEs.List, ie)
-
-	// NAS-PDU
-	ie = ngapType.InitialUEMessageIEs{}
-	ie.Id.Value = ngapType.ProtocolIEIDNASPDU
-	ie.Criticality.Value = ngapType.CriticalityPresentReject
-	ie.Value.Present = ngapType.InitialUEMessageIEsPresentNASPDU
-	ie.Value.NASPDU = new(ngapType.NASPDU)
-	ie.Value.NASPDU.Value = nasPdu
-	initialUEMessageIEs.List = append(initialUEMessageIEs.List, ie)
-
-	// User Location Information
-	ie = ngapType.InitialUEMessageIEs{}
-	ie.Id.Value = ngapType.ProtocolIEIDUserLocationInformation
-	ie.Criticality.Value = ngapType.CriticalityPresentReject
-	ie.Value.Present = ngapType.InitialUEMessageIEsPresentUserLocationInformation
-	ie.Value.UserLocationInformation = new(ngapType.UserLocationInformation)
-
-	userLocationInformation := ie.Value.UserLocationInformation
-	userLocationInformation.Present = ngapType.UserLocationInformationPresentUserLocationInformationNR
-	userLocationInformation.UserLocationInformationNR = new(ngapType.UserLocationInformationNR)
-
-	// Set PLMN and Cell ID from config
-	userLocationInformationNR := userLocationInformation.UserLocationInformationNR
-	userLocationInformationNR.NRCGI.PLMNIdentity.Value = plmnID.Value
-	userLocationInformationNR.NRCGI.NRCellIdentity.Value = aper.BitString{
-		Bytes:     []byte{0x00, 0x00, 0x00, 0x00, 0x10},
-		BitLength: 36,
+func buildInitialUEMessageForRegistration(ranUeNgapID int64, nasPdu []byte, plmnID ie.PLMNIdentity, tai ie.TAI) *message.InitialUEMessage {
+	nrPLMNIdentity := plmnID
+	return &message.InitialUEMessage{
+		// RAN UE NGAP ID
+		RANUENGAPID: &ie.RANUENGAPID{Value: ranUeNgapID},
+		// NAS-PDU
+		NASPDU: &ie.NASPDU{Value: aper.OctetString(nasPdu)},
+		// User Location Information: set PLMN and Cell ID from config
+		UserLocationInformation: &ie.UserLocationInformation{
+			Choice: &ie.UserLocationInformationNR{
+				NRCGI: &ie.NRCGI{
+					PLMNIdentity: &nrPLMNIdentity,
+					NRCellIdentity: &ie.NRCellIdentity{
+						Value: aper.BitString{
+							Bytes:     []byte{0x00, 0x00, 0x00, 0x00, 0x10},
+							BitLength: 36,
+						},
+					},
+				},
+				TAI: &ie.TAI{
+					PLMNIdentity: tai.PLMNIdentity,
+					TAC:          tai.TAC,
+				},
+			},
+		},
+		// RRC Establishment Cause (use MT Access like free-ran-ue)
+		RRCEstablishmentCause: &ie.RRCEstablishmentCause{Value: ie.RRCEstablishmentCausePresentMtAccess},
+		// UE Context Request - CRITICAL: Tells AMF to create UE context with proper access type
+		UEContextRequest: &ie.UEContextRequest{Value: ie.UEContextRequestPresentRequested},
 	}
-	userLocationInformationNR.TAI.PLMNIdentity.Value = tai.PLMNIdentity.Value
-	userLocationInformationNR.TAI.TAC.Value = tai.TAC.Value
-	initialUEMessageIEs.List = append(initialUEMessageIEs.List, ie)
-
-	// RRC Establishment Cause (use MT Access like free-ran-ue)
-	ie = ngapType.InitialUEMessageIEs{}
-	ie.Id.Value = ngapType.ProtocolIEIDRRCEstablishmentCause
-	ie.Criticality.Value = ngapType.CriticalityPresentIgnore
-	ie.Value.Present = ngapType.InitialUEMessageIEsPresentRRCEstablishmentCause
-	ie.Value.RRCEstablishmentCause = new(ngapType.RRCEstablishmentCause)
-	ie.Value.RRCEstablishmentCause.Value = ngapType.RRCEstablishmentCausePresentMtAccess
-	initialUEMessageIEs.List = append(initialUEMessageIEs.List, ie)
-
-	// UE Context Request - CRITICAL: Tells AMF to create UE context with proper access type
-	ie = ngapType.InitialUEMessageIEs{}
-	ie.Id.Value = ngapType.ProtocolIEIDUEContextRequest
-	ie.Criticality.Value = ngapType.CriticalityPresentIgnore
-	ie.Value.Present = ngapType.InitialUEMessageIEsPresentUEContextRequest
-	ie.Value.UEContextRequest = new(ngapType.UEContextRequest)
-	ie.Value.UEContextRequest.Value = ngapType.UEContextRequestPresentRequested
-	initialUEMessageIEs.List = append(initialUEMessageIEs.List, ie)
-
-	return pdu
 }

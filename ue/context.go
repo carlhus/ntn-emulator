@@ -6,7 +6,7 @@ import (
 
 	"test"
 
-	"github.com/free5gc/nas/security"
+	"github.com/free5gc/nas/message"
 	"github.com/free5gc/openapi/models"
 )
 
@@ -27,7 +27,7 @@ type UEContext struct {
 
 // AuthenticationSubscription stores UE authentication parameters
 type AuthenticationSubscription struct {
-	AuthMethod models.AuthMethod
+	AuthMethod models.Udr_DR_AuthMethod
 	K          string // Permanent Key (hex string)
 	OPC        string // Operator Code (hex string)
 	OP         string // Operator variant (hex string)
@@ -41,9 +41,9 @@ func NewUEContext(supi string, ranUeNgapId int64) *UEContext {
 	ranUe := test.NewRanUeContext(
 		supi,
 		ranUeNgapId,
-		security.AlgCiphering128NEA0,
-		security.AlgIntegrity128NIA2,
-		models.AccessType__3_GPP_ACCESS,
+		message.AlgCiphering128NEA0,
+		message.AlgIntegrity128NIA2,
+		models.AccessType_3_GPP_ACCESS,
 	)
 
 	return &UEContext{

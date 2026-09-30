@@ -11,9 +11,8 @@ import (
 	"ntn-emulator/ran/ngap"
 	"ntn-emulator/util"
 
-	"github.com/free5gc/nas"
-	"github.com/free5gc/nas/nasType"
-	"github.com/free5gc/ngap/ngapType"
+	"github.com/free5gc/nas/message"
+	"github.com/free5gc/ngap/ie"
 )
 
 // UEHandler handles a single UE's registration flow via control plane
@@ -22,8 +21,8 @@ type UEHandler struct {
 	ngapClient  *ngap.NGAPClient
 	ranUeNgapID int64
 	amfUeNgapID int64
-	plmnID      ngapType.PLMNIdentity
-	tai         ngapType.TAI
+	plmnID      ie.PLMNIdentity
+	tai         ie.TAI
 	mobileIMSI  string
 	ranConfig   *config.RANConfig
 	// xnServer, when non-nil, is notified with the UE context after PDU session
@@ -36,7 +35,7 @@ type UEHandler struct {
 // NewUEHandler creates a new UE handler.
 // xnServer, when non-nil, receives the UE context after PDU session establishment
 // so it can be served to the target RAN (RAN-2) via the Xn interface.
-func NewUEHandler(conn net.Conn, ngapClient *ngap.NGAPClient, ranUeNgapID int64, plmnID ngapType.PLMNIdentity, tai ngapType.TAI, ranConfig *config.RANConfig, xnServer *XnServer, scheduledStartTime *time.Time) *UEHandler {
+func NewUEHandler(conn net.Conn, ngapClient *ngap.NGAPClient, ranUeNgapID int64, plmnID ie.PLMNIdentity, tai ie.TAI, ranConfig *config.RANConfig, xnServer *XnServer, scheduledStartTime *time.Time) *UEHandler {
 	return &UEHandler{
 		conn:        conn,
 		ngapClient:  ngapClient,
@@ -61,14 +60,17 @@ func (h *UEHandler) HandleRegistration() error {
 	log.Printf("[RAN<-UE] Received %d bytes of registration request\n", len(ueRegRequest))
 
 	// Extract Mobile Identity from NAS message
-	nasMsg := nas.NewMessage()
-	if err := nasMsg.GmmMessageDecode(&ueRegRequest); err != nil {
+	nasMsg, err := message.Parse(ueRegRequest, nil)
+	if err != nil {
 		return fmt.Errorf("failed to decode registration request: %w", err)
 	}
-	if nasMsg.GmmMessage.RegistrationRequest != nil {
-		mobileID := nasMsg.GmmMessage.RegistrationRequest.MobileIdentity5GS
+	if regRequest, ok := nasMsg.(*message.RegReq); ok && regRequest.MobileId5GS != nil {
+		mobileID, err := regRequest.MobileId5GS.MarshalBinary()
+		if err != nil {
+			return fmt.Errorf("failed to encode mobile identity: %w", err)
+		}
 		h.mobileIMSI = extractIMSIFromMobileIdentity(mobileID)
-		log.Printf("[RAN] Mobile Identity buffer (hex): %x\n", mobileID.Buffer)
+		log.Printf("[RAN] Mobile Identity buffer (hex): %x\n", mobileID)
 		log.Printf("[RAN] Extracted IMSI: %s\n", h.mobileIMSI)
 	}
 
@@ -368,18 +370,18 @@ func (h *UEHandler) handleDeregistration() error {
 	return nil
 }
 
-// extractIMSIFromMobileIdentity extracts IMSI string from Mobile Identity 5GS
-func extractIMSIFromMobileIdentity(mobileID nasType.MobileIdentity5GS) string {
-	if len(mobileID.Buffer) < 1 {
+// extractIMSIFromMobileIdentity extracts IMSI string from encoded Mobile Identity 5GS contents
+func extractIMSIFromMobileIdentity(mobileID []byte) string {
+	if len(mobileID) < 1 {
 		return ""
 	}
 
 	// First byte contains type and odd/even indicator
 	// Remaining bytes contain BCD-encoded IMSI digits
 	digits := ""
-	for i := 1; i < len(mobileID.Buffer); i++ {
-		digit1 := mobileID.Buffer[i] & 0x0F
-		digit2 := (mobileID.Buffer[i] >> 4) & 0x0F
+	for i := 1; i < len(mobileID); i++ {
+		digit1 := mobileID[i] & 0x0F
+		digit2 := (mobileID[i] >> 4) & 0x0F
 
 		if digit1 <= 9 {
 			digits += fmt.Sprintf("%d", digit1)

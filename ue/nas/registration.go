@@ -1,7 +1,6 @@
 package nas
 
 import (
-	"bytes"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -9,8 +8,8 @@ import (
 	"ntn-emulator/ue"
 	"ntn-emulator/util"
 
-	"github.com/free5gc/nas"
-	"github.com/free5gc/nas/nasMessage"
+	"github.com/free5gc/nas/ie"
+	"github.com/free5gc/nas/message"
 	"github.com/free5gc/openapi/models"
 	"github.com/free5gc/util/milenage"
 )
@@ -68,16 +67,19 @@ func (h *RegistrationHandler) PerformRegistration() error {
 // sendRegistrationRequest sends initial Registration Request to RAN
 func (h *RegistrationHandler) sendRegistrationRequest() error {
 	// Build Mobile Identity 5GS
-	mobileIdentity := BuildMobileIdentity5GS(h.ue.Supi)
+	mobileIdentity, err := BuildMobileIdentity5GS(h.ue.Supi)
+	if err != nil {
+		return err
+	}
 
 	// Build UE Security Capability
 	ueSecurityCapability := BuildUESecurityCapability(h.ue.CipheringAlg, h.ue.IntegrityAlg)
 
 	// Build Registration Request (initial, without 5GMM capability)
 	regRequest, err := BuildRegistrationRequest(
-		nasMessage.RegistrationType5GSInitialRegistration,
-		&mobileIdentity,
-		&ueSecurityCapability,
+		ie.RegType_InitialReg,
+		mobileIdentity,
+		ueSecurityCapability,
 		nil, // No 5GMM capability yet
 	)
 	if err != nil {
@@ -103,26 +105,29 @@ func (h *RegistrationHandler) handleAuthenticationRequest() error {
 	fmt.Printf("Received %d bytes of authentication request from RAN\n", len(nasPduBytes))
 
 	// Decode NAS message
-	securityHeaderType := nas.GetSecurityHeaderType(nasPduBytes)
-	nasPdu, err := h.codec.Decode(securityHeaderType, nasPduBytes)
+	nasPdu, err := h.codec.Decode(nasPduBytes)
 	if err != nil {
 		return fmt.Errorf("failed to decode NAS message: %w", err)
 	}
 
 	// Verify message type
-	if nasPdu.GmmHeader.GetMessageType() != nas.MsgTypeAuthenticationRequest {
-		return fmt.Errorf("expected Authentication Request, got message type %d", nasPdu.GmmHeader.GetMessageType())
+	authRequest, ok := nasPdu.(*message.AuthReq)
+	if !ok {
+		return fmt.Errorf("expected Authentication Request, got %T", nasPdu)
 	}
 
 	// Extract RAND and AUTN
-	rand := nasPdu.AuthenticationRequest.GetRANDValue()
-	autn := nasPdu.AuthenticationRequest.GetAUTN()
+	if authRequest.AuthParamRAND5GAuthChlg == nil || authRequest.AuthParamAUTN5GAuthChlg == nil {
+		return fmt.Errorf("authentication request missing RAND or AUTN")
+	}
+	rand := authRequest.AuthParamRAND5GAuthChlg.Rand
+	autn := authRequest.AuthParamAUTN5GAuthChlg.Autn
 
 	// CRITICAL: Extract and update SQN from AUTN BEFORE deriving keys.
 	// DeriveRESstarAndSetKey uses authSubs.SequenceNumber.Sqn to compute SQNxorAK
 	// inside DerivateKamf. The network derives Kamf with the SQN from the AUTN.
 	// If localSQN != networkSQN, SQNxorAK differs → wrong Kamf → MAC failures on re-registration.
-	if newSQN, err := extractSQNFromAUTN(autn[:], rand[:], h.ue.AuthenticationSubs); err == nil {
+	if newSQN, err := extractSQNFromAUTN(autn, rand, h.ue.AuthenticationSubs); err == nil {
 		if h.ue.AuthenticationSubs.SequenceNumber != nil {
 			oldSQN := h.ue.AuthenticationSubs.SequenceNumber.Sqn
 			h.ue.AuthenticationSubs.SequenceNumber.Sqn = newSQN
@@ -135,7 +140,7 @@ func (h *RegistrationHandler) handleAuthenticationRequest() error {
 
 	// Derive RES* and NAS keys from the new Kamf using the network's SQN (just updated above).
 	// DeriveRESstarAndSetKey internally calls DerivateAlgKey() to compute KnasEnc/KnasInt.
-	resStar := h.ue.DeriveRESstarAndSetKey(h.ue.AuthenticationSubs, rand[:], "5G:mnc093.mcc208.3gppnetwork.org")
+	resStar := h.ue.DeriveRESstarAndSetKey(h.ue.AuthenticationSubs, rand, "5G:mnc093.mcc208.3gppnetwork.org")
 
 	// Build and send Authentication Response
 	authResponse, err := BuildAuthenticationResponse(resStar)
@@ -167,23 +172,22 @@ func (h *RegistrationHandler) handleSecurityModeCommand() error {
 	}
 
 	// Decode NAS message
-	securityHeaderType := nas.GetSecurityHeaderType(nasPduBytes)
-	nasPdu, err := h.codec.Decode(securityHeaderType, nasPduBytes)
+	nasPdu, err := h.codec.Decode(nasPduBytes)
 	if err != nil {
 		return fmt.Errorf("failed to decode NAS message: %w", err)
 	}
 
 	// Verify message type
-	if nasPdu.GmmHeader.GetMessageType() != nas.MsgTypeSecurityModeCommand {
-		return fmt.Errorf("expected Security Mode Command, got message type %d", nasPdu.GmmHeader.GetMessageType())
+	secModeCmd, ok := nasPdu.(*message.SecModeCmd)
+	if !ok {
+		return fmt.Errorf("expected Security Mode Command, got %T", nasPdu)
 	}
 
 	// Extract selected NAS security algorithms from Security Mode Command
 	// and update the UE context before deriving NAS keys
-	secModeCmd := nasPdu.GmmMessage.SecurityModeCommand
-	if secModeCmd != nil {
-		selectedCiphering := secModeCmd.SelectedNASSecurityAlgorithms.GetTypeOfCipheringAlgorithm()
-		selectedIntegrity := secModeCmd.SelectedNASSecurityAlgorithms.GetTypeOfIntegrityProtectionAlgorithm()
+	if secModeCmd.SelectedNASSecAlgos != nil {
+		selectedCiphering := secModeCmd.SelectedNASSecAlgos.CipheringAlgo
+		selectedIntegrity := secModeCmd.SelectedNASSecAlgos.MsgIntAlgo
 		fmt.Printf("Selected algorithms: ciphering=%d, integrity=%d\n", selectedCiphering, selectedIntegrity)
 		h.ue.RanUeContext.CipheringAlg = selectedCiphering
 		h.ue.RanUeContext.IntegrityAlg = selectedIntegrity
@@ -195,14 +199,17 @@ func (h *RegistrationHandler) handleSecurityModeCommand() error {
 	fmt.Println("Derived new NAS keys from Kamf")
 
 	// Build Registration Request with 5GMM capability
-	mobileIdentity := BuildMobileIdentity5GS(h.ue.Supi)
+	mobileIdentity, err := BuildMobileIdentity5GS(h.ue.Supi)
+	if err != nil {
+		return err
+	}
 	ueSecurityCapability := BuildUESecurityCapability(h.ue.CipheringAlg, h.ue.IntegrityAlg)
 	capability5GMM := h.ue.Get5GMMCapability()
 
 	regRequestWith5GMM, err := BuildRegistrationRequest(
-		nasMessage.RegistrationType5GSInitialRegistration,
-		&mobileIdentity,
-		&ueSecurityCapability,
+		ie.RegType_InitialReg,
+		mobileIdentity,
+		ueSecurityCapability,
 		capability5GMM,
 	)
 	if err != nil {
@@ -210,19 +217,11 @@ func (h *RegistrationHandler) handleSecurityModeCommand() error {
 	}
 
 	// Build Security Mode Complete with embedded Registration Request
-	secModeComplete, err := BuildSecurityModeComplete(regRequestWith5GMM)
-	if err != nil {
-		return fmt.Errorf("failed to build security mode complete: %w", err)
-	}
+	secModeComplete := BuildSecurityModeComplete(regRequestWith5GMM)
 
 	// Encode with security (new security context)
-	m := new(nas.Message)
-	if err := m.PlainNasDecode(&secModeComplete); err != nil {
-		return fmt.Errorf("failed to decode security mode complete: %w", err)
-	}
-
-	encodedMsg, err := h.codec.Encode(m,
-		nas.SecurityHeaderTypeIntegrityProtectedAndCipheredWithNew5gNasSecurityContext, true, true)
+	encodedMsg, err := h.codec.Encode(secModeComplete,
+		message.SecHdrTypeIntegrityProtectedAndCipheredWithNew5gNasSecCtx, true, true)
 	if err != nil {
 		return fmt.Errorf("failed to encode security mode complete: %w", err)
 	}
@@ -247,24 +246,22 @@ func (h *RegistrationHandler) handleRegistrationAccept() error {
 	fmt.Printf("Received %d bytes of registration accept from RAN\n", len(nasPduBytes))
 
 	// Decode NAS message
-	securityHeaderType := nas.GetSecurityHeaderType(nasPduBytes)
-	nasPdu, err := h.codec.Decode(securityHeaderType, nasPduBytes)
+	nasPdu, err := h.codec.Decode(nasPduBytes)
 	if err != nil {
 		return fmt.Errorf("failed to decode NAS message: %w", err)
 	}
 
-	// Check if we received Identity Request first (message type 0x5B = 91)
-	msgType := nasPdu.GmmHeader.GetMessageType()
-	fmt.Printf("DEBUG: Received message type: %d (0x%02X)\n", msgType, msgType)
+	// Check if we received Identity Request first
+	fmt.Printf("DEBUG: Received message type: %T\n", nasPdu)
 
-	if msgType == 91 { // Identity Request (0x5B)
+	if identityRequest, ok := nasPdu.(*message.IdReq); ok {
 		// Check what type of identity is requested
 		var requestedType uint8
-		if nasPdu.IdentityRequest != nil {
-			requestedType = nasPdu.IdentityRequest.SpareHalfOctetAndIdentityType.GetTypeOfIdentity()
+		if identityRequest.IdType != nil {
+			requestedType = identityRequest.IdType.IdType
 			fmt.Printf("Identity Request: Type requested = %d\n", requestedType)
 		} else {
-			return fmt.Errorf("Identity Request message is nil")
+			return fmt.Errorf("Identity Request has no identity type")
 		}
 
 		fmt.Println("Received Identity Request, sending Identity Response...")
@@ -275,16 +272,9 @@ func (h *RegistrationHandler) handleRegistrationAccept() error {
 			return fmt.Errorf("failed to build identity response: %w", err)
 		}
 
-		fmt.Printf("DEBUG: Identity Response payload (first 32 bytes): %02x\n", identityResponse[:min(32, len(identityResponse))])
-
 		// Encode with security
-		m := new(nas.Message)
-		if err := m.PlainNasDecode(&identityResponse); err != nil {
-			return fmt.Errorf("failed to decode identity response: %w", err)
-		}
-
-		encodedMsg, err := h.codec.Encode(m,
-			nas.SecurityHeaderTypeIntegrityProtectedAndCiphered, true, false)
+		encodedMsg, err := h.codec.Encode(identityResponse,
+			message.SecHdrTypeIntegrityProtectedAndCiphered, true, false)
 		if err != nil {
 			return fmt.Errorf("failed to encode identity response: %w", err)
 		}
@@ -306,19 +296,17 @@ func (h *RegistrationHandler) handleRegistrationAccept() error {
 		}
 		fmt.Printf("[UE] DEBUG: Received %d bytes after Identity Response\n", len(nasPduBytes))
 
-		securityHeaderType = nas.GetSecurityHeaderType(nasPduBytes)
-		nasPdu, err = h.codec.Decode(securityHeaderType, nasPduBytes)
+		nasPdu, err = h.codec.Decode(nasPduBytes)
 		if err != nil {
 			return fmt.Errorf("failed to decode NAS message: %w", err)
 		}
 
-		msgType = nasPdu.GmmHeader.GetMessageType()
-		fmt.Printf("DEBUG: After Identity Response, received message type: %d (0x%02X)\n", msgType, msgType)
+		fmt.Printf("DEBUG: After Identity Response, received message type: %T\n", nasPdu)
 	}
 
 	// Verify message type
-	if nasPdu.GmmHeader.GetMessageType() != nas.MsgTypeRegistrationAccept {
-		return fmt.Errorf("expected Registration Accept, got message type %d", nasPdu.GmmHeader.GetMessageType())
+	if _, ok := nasPdu.(*message.RegAccept); !ok {
+		return fmt.Errorf("expected Registration Accept, got %T", nasPdu)
 	}
 
 	fmt.Println("✓ Registration Accept received")
@@ -333,19 +321,11 @@ func (h *RegistrationHandler) handleRegistrationAccept() error {
 	fmt.Println("✓ Initial Context Setup Response sent")
 
 	// Build Registration Complete
-	regComplete, err := BuildRegistrationComplete()
-	if err != nil {
-		return fmt.Errorf("failed to build registration complete: %w", err)
-	}
+	regComplete := BuildRegistrationComplete()
 
 	// Encode with security
-	m := new(nas.Message)
-	if err := m.PlainNasDecode(&regComplete); err != nil {
-		return fmt.Errorf("failed to decode registration complete: %w", err)
-	}
-
-	encodedMsg, err := h.codec.Encode(m,
-		nas.SecurityHeaderTypeIntegrityProtectedAndCiphered, true, false)
+	encodedMsg, err := h.codec.Encode(regComplete,
+		message.SecHdrTypeIntegrityProtectedAndCiphered, true, false)
 	if err != nil {
 		return fmt.Errorf("failed to encode registration complete: %w", err)
 	}
@@ -371,41 +351,20 @@ func (h *RegistrationHandler) handleConfigurationUpdate() error {
 	}
 
 	// Decode NAS message
-	securityHeaderType := nas.GetSecurityHeaderType(nasPduBytes)
-	nasPdu, err := h.codec.Decode(securityHeaderType, nasPduBytes)
+	nasPdu, err := h.codec.Decode(nasPduBytes)
 	if err != nil {
 		return fmt.Errorf("failed to decode NAS message: %w", err)
 	}
 
 	// Verify message type (optional, just receive and acknowledge)
-	if nasPdu.GmmHeader.GetMessageType() != nas.MsgTypeConfigurationUpdateCommand {
-		return fmt.Errorf("expected Configuration Update Command, got message type %d",
-			nasPdu.GmmHeader.GetMessageType())
+	if _, ok := nasPdu.(*message.CfgUpdateCmd); !ok {
+		return fmt.Errorf("expected Configuration Update Command, got %T", nasPdu)
 	}
 
 	fmt.Println("✓ Configuration Update Command received")
 
-	// Send Configuration Update Complete
-	configUpdateComplete := nasMessage.NewConfigurationUpdateComplete(0)
-	configUpdateComplete.ExtendedProtocolDiscriminator.SetExtendedProtocolDiscriminator(nasMessage.Epd5GSMobilityManagementMessage)
-	configUpdateComplete.SpareHalfOctetAndSecurityHeaderType.SetSecurityHeaderType(nas.SecurityHeaderTypePlainNas)
-	configUpdateComplete.SpareHalfOctetAndSecurityHeaderType.SetSpareHalfOctet(0)
-	configUpdateComplete.ConfigurationUpdateCompleteMessageIdentity.SetMessageType(nas.MsgTypeConfigurationUpdateComplete)
-
-	// Encode plain NAS message
-	var buf bytes.Buffer
-	if err := configUpdateComplete.EncodeConfigurationUpdateComplete(&buf); err != nil {
-		return fmt.Errorf("failed to encode configuration update complete: %w", err)
-	}
-
-	// Encode with security
-	m := new(nas.Message)
-	bufBytes := buf.Bytes()
-	if err := m.PlainNasDecode(&bufBytes); err != nil {
-		return fmt.Errorf("failed to decode configuration update complete: %w", err)
-	}
-
-	encodedMsg, err := h.codec.Encode(m, nas.SecurityHeaderTypeIntegrityProtectedAndCiphered, true, false)
+	// Send Configuration Update Complete, encoded with security
+	encodedMsg, err := h.codec.Encode(BuildConfigurationUpdateComplete(), message.SecHdrTypeIntegrityProtectedAndCiphered, true, false)
 	if err != nil {
 		return fmt.Errorf("failed to encode configuration update complete with security: %w", err)
 	}
@@ -422,7 +381,7 @@ func (h *RegistrationHandler) handleConfigurationUpdate() error {
 // extractSQNFromAUTN extracts and updates the SQN from AUTN
 // AUTN format: SQN ⊕ AK (6 bytes) || AMF (2 bytes) || MAC (8 bytes)
 // This function derives AK from K, OPC, and RAND, then recovers SQN = (SQN ⊕ AK) ⊕ AK
-func extractSQNFromAUTN(autn []byte, rand []byte, authSubs models.AuthenticationSubscription) (string, error) {
+func extractSQNFromAUTN(autn []byte, rand []byte, authSubs models.Udr_DR_AuthenticationSubscription) (string, error) {
 	if len(autn) < 16 {
 		return "", fmt.Errorf("invalid AUTN length: %d", len(autn))
 	}

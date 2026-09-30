@@ -1,17 +1,14 @@
 package nas
 
 import (
-	"bytes"
 	"fmt"
 	"net"
 
 	"ntn-emulator/util"
 	"ntn-emulator/ue"
 
-	"github.com/free5gc/nas"
-	"github.com/free5gc/nas/nasConvert"
-	"github.com/free5gc/nas/nasMessage"
-	"github.com/free5gc/nas/nasType"
+	"github.com/free5gc/nas/ie"
+	"github.com/free5gc/nas/message"
 	"github.com/free5gc/openapi/models"
 )
 
@@ -53,19 +50,16 @@ func (h *PDUSessionHandler) EstablishPDUSession(pduSessionID uint8, dnn string, 
 // sendPDUSessionEstablishmentRequest sends PDU Session Establishment Request
 func (h *PDUSessionHandler) sendPDUSessionEstablishmentRequest(pduSessionID uint8, dnn string, sNssai *models.Snssai) error {
 	// Step 1: Build PDU Session Establishment Request message
-	pduSessionBytes, err := buildPDUSessionEstablishmentRequest(pduSessionID)
+	pduSessionBytes, err := BuildPDUSessionEstablishmentRequest(pduSessionID)
 	if err != nil {
 		return fmt.Errorf("failed to build PDU session establishment request: %w", err)
 	}
 
 	// Step 2: Wrap it in UL NAS Transport message
-	ulNasTransportBytes, err := buildULNASTransport(pduSessionBytes, pduSessionID, dnn, sNssai)
-	if err != nil {
-		return fmt.Errorf("failed to build UL NAS transport: %w", err)
-	}
+	ulNasTransport := BuildULNASTransport(pduSessionBytes, pduSessionID, dnn, sNssai)
 
-	// Step 3: Encode with security (using test.EncodeNasPduWithSecurity directly)
-	encodedMsg, err := h.codec.EncodeBytes(ulNasTransportBytes, nas.SecurityHeaderTypeIntegrityProtectedAndCiphered, true, false)
+	// Step 3: Encode with security
+	encodedMsg, err := h.codec.Encode(ulNasTransport, message.SecHdrTypeIntegrityProtectedAndCiphered, true, false)
 	if err != nil {
 		return fmt.Errorf("failed to encode UL NAS transport: %w", err)
 	}
@@ -89,43 +83,21 @@ func (h *PDUSessionHandler) receivePDUSessionEstablishmentAccept() error {
 	fmt.Printf("Received %d bytes from RAN (PDU Session Establishment Accept)\n", len(nasPduBytes))
 
 	// Decode NAS message
-	securityHeaderType := nas.GetSecurityHeaderType(nasPduBytes)
-	nasPdu, err := h.codec.Decode(securityHeaderType, nasPduBytes)
+	nasPdu, err := h.codec.Decode(nasPduBytes)
 	if err != nil {
 		return fmt.Errorf("failed to decode NAS message: %w", err)
 	}
 
-	// Verify it's DL NAS Transport
-	if nasPdu.GmmHeader.GetMessageType() != nas.MsgTypeDLNASTransport {
-		return fmt.Errorf("expected DL NAS Transport, got message type 0x%02X", nasPdu.GmmHeader.GetMessageType())
-	}
-
 	// Extract PDU Session Establishment Accept from DL NAS Transport
-	dlNasTransport := nasPdu.DLNASTransport
-	if dlNasTransport == nil {
-		return fmt.Errorf("DL NAS Transport is nil")
-	}
-
-	// Extract payload container (contains PDU Session Establishment Accept)
-	payload := dlNasTransport.PayloadContainer.GetPayloadContainerContents()
-	if len(payload) == 0 {
-		return fmt.Errorf("payload container is empty")
-	}
-
-	// Decode PDU Session Establishment Accept from payload
-	gsmMsg := nas.NewMessage()
-	if err := gsmMsg.GsmMessageDecode(&payload); err != nil {
-		return fmt.Errorf("failed to decode GSM message: %w", err)
-	}
-
-	if gsmMsg.GsmHeader.GetMessageType() != nas.MsgTypePDUSessionEstablishmentAccept {
-		return fmt.Errorf("expected PDU Session Establishment Accept, got message type 0x%02X", gsmMsg.GsmHeader.GetMessageType())
+	pduEstabAccept, err := ExtractPDUSessionEstablishmentAccept(nasPdu)
+	if err != nil {
+		return err
 	}
 
 	fmt.Println("✓ PDU Session Establishment Accept received")
 
 	// Extract UE IP address and other info
-	if err := h.extractUEInformation(gsmMsg); err != nil {
+	if err := h.extractUEInformation(pduEstabAccept); err != nil {
 		return fmt.Errorf("failed to extract UE information: %w", err)
 	}
 
@@ -133,26 +105,15 @@ func (h *PDUSessionHandler) receivePDUSessionEstablishmentAccept() error {
 }
 
 // extractUEInformation extracts UE IP address, TEIDs from PDU Session Establishment Accept
-func (h *PDUSessionHandler) extractUEInformation(gsmMsg *nas.Message) error {
-	pduEstabAccept := gsmMsg.PDUSessionEstablishmentAccept
-	if pduEstabAccept == nil {
-		return fmt.Errorf("PDU Session Establishment Accept is nil")
-	}
-
+func (h *PDUSessionHandler) extractUEInformation(pduEstabAccept *message.PDUSessEstAccept) error {
 	// Extract PDU Address (UE IP)
-	if pduEstabAccept.PDUAddress != nil {
-		pduAddress := pduEstabAccept.PDUAddress
-		if pduAddress.GetPDUSessionTypeValue() == nasMessage.PDUSessionTypeIPv4 {
-			ipBytes := pduAddress.GetPDUAddressInformation()
-			if len(ipBytes) >= 4 {
-				h.ue.UEIPAddress = fmt.Sprintf("%d.%d.%d.%d", ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3])
-				fmt.Printf("✓ UE IP Address: %s\n", h.ue.UEIPAddress)
-			}
-		}
+	if ueIP, ok := PDUAddressIPv4(pduEstabAccept); ok {
+		h.ue.UEIPAddress = ueIP
+		fmt.Printf("✓ UE IP Address: %s\n", h.ue.UEIPAddress)
 	}
 
 	// Extract Authorized QoS Rules
-	if len(pduEstabAccept.AuthorizedQosRules.GetQosRule()) > 0 {
+	if pduEstabAccept.AuthoQosRules != nil {
 		fmt.Println("✓ Authorized QoS Rules received")
 	}
 
@@ -162,103 +123,105 @@ func (h *PDUSessionHandler) extractUEInformation(gsmMsg *nas.Message) error {
 	return nil
 }
 
-// buildPDUSessionEstablishmentRequest builds PDU Session Establishment Request (like free-ran-ue)
-func buildPDUSessionEstablishmentRequest(pduSessionID uint8) ([]byte, error) {
-	m := nas.NewMessage()
-	m.GsmMessage = nas.NewGsmMessage()
-	m.GsmHeader.SetMessageType(nas.MsgTypePDUSessionEstablishmentRequest)
-
-	pduSessionRequest := nasMessage.NewPDUSessionEstablishmentRequest(0)
-	pduSessionRequest.ExtendedProtocolDiscriminator.SetExtendedProtocolDiscriminator(nasMessage.Epd5GSSessionManagementMessage)
-	pduSessionRequest.SetMessageType(nas.MsgTypePDUSessionEstablishmentRequest)
-	pduSessionRequest.PDUSessionID.SetPDUSessionID(pduSessionID)
-	pduSessionRequest.PTI.SetPTI(0x00)
-	pduSessionRequest.IntegrityProtectionMaximumDataRate.SetMaximumDataRatePerUEForUserPlaneIntegrityProtectionForDownLink(0xff)
-	pduSessionRequest.IntegrityProtectionMaximumDataRate.SetMaximumDataRatePerUEForUserPlaneIntegrityProtectionForUpLink(0xff)
-
-	// Set PDU Session Type to IPv4
-	pduSessionRequest.PDUSessionType = nasType.NewPDUSessionType(nasMessage.PDUSessionEstablishmentRequestPDUSessionTypeType)
-	pduSessionRequest.PDUSessionType.SetPDUSessionTypeValue(uint8(0x01)) // IPv4
-
-	// Set SSC Mode to SSC Mode 1
-	pduSessionRequest.SSCMode = nasType.NewSSCMode(nasMessage.PDUSessionEstablishmentRequestSSCModeType)
-	pduSessionRequest.SSCMode.SetSSCMode(uint8(0x01)) // SSC Mode 1
-
-	// Set Extended Protocol Configuration Options
-	pduSessionRequest.ExtendedProtocolConfigurationOptions = nasType.NewExtendedProtocolConfigurationOptions(nasMessage.PDUSessionEstablishmentRequestExtendedProtocolConfigurationOptionsType)
-	protocolConfigurationOptions := nasConvert.NewProtocolConfigurationOptions()
-	protocolConfigurationOptions.AddIPAddressAllocationViaNASSignallingUL()
-	protocolConfigurationOptions.AddDNSServerIPv4AddressRequest()
-	protocolConfigurationOptions.AddDNSServerIPv6AddressRequest()
-	pcoContents := protocolConfigurationOptions.Marshal()
-	pcoContentsLength := len(pcoContents)
-	pduSessionRequest.ExtendedProtocolConfigurationOptions.SetLen(uint16(pcoContentsLength))
-	pduSessionRequest.ExtendedProtocolConfigurationOptions.SetExtendedProtocolConfigurationOptionsContents(pcoContents)
-
-	m.GsmMessage.PDUSessionEstablishmentRequest = pduSessionRequest
-
-	request := new(bytes.Buffer)
-	if err := m.GsmMessageEncode(request); err != nil {
-		return nil, err
+// ExtractPDUSessionEstablishmentAccept extracts the PDU Session Establishment Accept
+// carried in the payload container of a DL NAS Transport message
+func ExtractPDUSessionEstablishmentAccept(nasPdu message.Message) (*message.PDUSessEstAccept, error) {
+	// Verify it's DL NAS Transport
+	dlNasTransport, ok := nasPdu.(*message.DLNASTransport)
+	if !ok {
+		return nil, fmt.Errorf("expected DL NAS Transport, got %T", nasPdu)
 	}
 
-	return request.Bytes(), nil
+	// Extract payload container (contains PDU Session Establishment Accept)
+	if dlNasTransport.PayloadCntr == nil || len(dlNasTransport.PayloadCntr.Contents) == 0 {
+		return nil, fmt.Errorf("payload container is empty")
+	}
+
+	// Decode PDU Session Establishment Accept from payload
+	gsmMsg, err := message.ParseGSM(dlNasTransport.PayloadCntr.Contents)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode GSM message: %w", err)
+	}
+
+	pduEstabAccept, ok := gsmMsg.(*message.PDUSessEstAccept)
+	if !ok {
+		return nil, fmt.Errorf("expected PDU Session Establishment Accept, got %T", gsmMsg)
+	}
+
+	return pduEstabAccept, nil
 }
 
-// buildULNASTransport builds UL NAS Transport message wrapping PDU Session Establishment Request (like free-ran-ue)
-func buildULNASTransport(nasMessageContainer []byte, pduSessionID uint8, dnn string, sNssai *models.Snssai) ([]byte, error) {
-	m := nas.NewMessage()
-	m.GmmMessage = nas.NewGmmMessage()
-	m.GmmHeader.SetMessageType(nas.MsgTypeULNASTransport)
+// PDUAddressIPv4 returns the IPv4 PDU address assigned in a PDU Session Establishment Accept
+func PDUAddressIPv4(pduEstabAccept *message.PDUSessEstAccept) (string, bool) {
+	if pduEstabAccept.PDUAddr == nil || len(pduEstabAccept.PDUAddr.IPv4) < 4 {
+		return "", false
+	}
+	ipBytes := pduEstabAccept.PDUAddr.IPv4
+	return fmt.Sprintf("%d.%d.%d.%d", ipBytes[0], ipBytes[1], ipBytes[2], ipBytes[3]), true
+}
 
-	ulNasTransport := nasMessage.NewULNASTransport(0)
-	ulNasTransport.SpareHalfOctetAndSecurityHeaderType.SetSecurityHeaderType(nas.SecurityHeaderTypePlainNas)
-	ulNasTransport.SetMessageType(nas.MsgTypeULNASTransport)
-	ulNasTransport.ExtendedProtocolDiscriminator.SetExtendedProtocolDiscriminator(nasMessage.Epd5GSMobilityManagementMessage)
+// BuildPDUSessionEstablishmentRequest builds a plain-encoded PDU Session Establishment Request (like free-ran-ue)
+func BuildPDUSessionEstablishmentRequest(pduSessionID uint8) ([]byte, error) {
+	pduSessionRequest := &message.PDUSessEstReq{
+		PDUSessId: pduSessionID,
+		PTI:       0x00,
+		IntegrityProtectionMaxDataRate: &ie.IntegrityProtectionMaxDataRate{
+			Uplink:   0xff,
+			Downlink: 0xff,
+		},
+		// Set PDU Session Type to IPv4
+		PDUSessType: &ie.PDUSessType{
+			Value: ie.PDUSessType_IPv4,
+		},
+		// Set SSC Mode to SSC Mode 1
+		SSCMode: &ie.SSCMode{
+			Mode: ie.SSCMODE1,
+		},
+		// Set Extended Protocol Configuration Options
+		ExtendedProtCfgOpts: &ie.ExtendedProtCfgOpts{
+			FromMs: &ie.ExtCfgOptFromMs{
+				DNSV4Req: true,
+				DNSV6Req: true,
+			},
+		},
+	}
 
-	// Set PDU Session ID
-	ulNasTransport.PduSessionID2Value = new(nasType.PduSessionID2Value)
-	ulNasTransport.PduSessionID2Value.SetIei(nasMessage.ULNASTransportPduSessionID2ValueType)
-	ulNasTransport.PduSessionID2Value.SetPduSessionID2Value(pduSessionID)
+	return pduSessionRequest.MarshalBinary()
+}
 
-	// Set Request Type to Initial Request
-	ulNasTransport.RequestType = new(nasType.RequestType)
-	ulNasTransport.RequestType.SetIei(nasMessage.ULNASTransportRequestTypeType)
-	ulNasTransport.RequestType.SetRequestTypeValue(nasMessage.ULNASTransportRequestTypeInitialRequest)
+// BuildULNASTransport builds UL NAS Transport message wrapping PDU Session Establishment Request (like free-ran-ue)
+func BuildULNASTransport(nasMessageContainer []byte, pduSessionID uint8, dnn string, sNssai *models.Snssai) *message.ULNASTransport {
+	ulNasTransport := &message.ULNASTransport{
+		// Set Payload Container Type and contents
+		PayloadCntrType: &ie.PayloadCntrType{
+			Value: ie.PayloadCntrType_N1SMInfo,
+		},
+		PayloadCntr: &ie.PayloadCntr{
+			Pct:      ie.PayloadCntrType_N1SMInfo,
+			Contents: nasMessageContainer,
+		},
+		// Set PDU Session ID
+		PDUSessID: &ie.PDUSessId2{
+			Value: pduSessionID,
+		},
+		// Set Request Type to Initial Request
+		ReqType: &ie.ReqType{
+			Value: ie.ReqType_InitialReq,
+		},
+	}
 
 	// Set DNN if provided
 	if dnn != "" {
-		ulNasTransport.DNN = new(nasType.DNN)
-		ulNasTransport.DNN.SetIei(nasMessage.ULNASTransportDNNType)
-		ulNasTransport.DNN.SetDNN(dnn)
+		ulNasTransport.DNN = &ie.DNN{Value: dnn}
 	}
 
-	// Set S-NSSAI if provided
+	// Set S-NSSAI if provided (SD is a hex string)
 	if sNssai != nil {
-		var sdTemp [3]uint8
-		if sNssai.Sd != "" {
-			// Parse SD from hex string
-			var sdBytes [3]byte
-			fmt.Sscanf(sNssai.Sd, "%02x%02x%02x", &sdBytes[0], &sdBytes[1], &sdBytes[2])
-			copy(sdTemp[:], sdBytes[:])
+		ulNasTransport.SNSSAI = &ie.SNSSAI{
+			SST: uint8(sNssai.Sst),
+			SD:  sNssai.Sd,
 		}
-		ulNasTransport.SNSSAI = nasType.NewSNSSAI(nasMessage.ULNASTransportSNSSAIType)
-		ulNasTransport.SNSSAI.SetLen(4)
-		ulNasTransport.SNSSAI.SetSST(uint8(sNssai.Sst))
-		ulNasTransport.SNSSAI.SetSD(sdTemp)
 	}
 
-	// Set Payload Container Type and contents
-	ulNasTransport.SpareHalfOctetAndPayloadContainerType.SetPayloadContainerType(nasMessage.PayloadContainerTypeN1SMInfo)
-	ulNasTransport.PayloadContainer.SetLen(uint16(len(nasMessageContainer)))
-	ulNasTransport.PayloadContainer.SetPayloadContainerContents(nasMessageContainer)
-
-	m.GmmMessage.ULNASTransport = ulNasTransport
-
-	message := new(bytes.Buffer)
-	if err := m.GmmMessageEncode(message); err != nil {
-		return nil, err
-	}
-
-	return message.Bytes(), nil
+	return ulNasTransport
 }

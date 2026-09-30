@@ -19,7 +19,7 @@ import (
 	"ntn-emulator/ue"
 	"ntn-emulator/util"
 
-	ngapType "github.com/free5gc/ngap/ngapType"
+	ngapie "github.com/free5gc/ngap/ie"
 	"github.com/free5gc/openapi/models"
 )
 
@@ -98,12 +98,12 @@ func main() {
 	uectx := ue.NewUEContext(supi, 1)
 
 	// Set authentication subscription from config (manually to use config SQN)
-	uectx.AuthenticationSubs = models.AuthenticationSubscription{
-		AuthenticationMethod:          models.AuthMethod__5_G_AKA,
+	uectx.AuthenticationSubs = models.Udr_DR_AuthenticationSubscription{
+		AuthenticationMethod:          models.Udr_DR_AuthMethod_5_G_AKA,
 		EncPermanentKey:               ueCfg.UE.AuthenticationSubscription.EncPermanentKey,
 		EncOpcKey:                     ueCfg.UE.AuthenticationSubscription.EncOpcKey,
 		AuthenticationManagementField: ueCfg.UE.AuthenticationSubscription.AuthenticationManagementField,
-		SequenceNumber: &models.SequenceNumber{
+		SequenceNumber: &models.Udr_DR_SequenceNumber{
 			Sqn: ueCfg.UE.AuthenticationSubscription.SequenceNumber,
 		},
 	}
@@ -160,9 +160,10 @@ func main() {
 		log.Fatalf("Failed to encode TAC: %v", err)
 	}
 
-	tai := ngapType.TAI{
-		PLMNIdentity: plmnID,
-		TAC:          tac,
+	taiPLMNIdentity := plmnID
+	tai := ngapie.TAI{
+		PLMNIdentity: &taiPLMNIdentity,
+		TAC:          &tac,
 	}
 
 	// Start RAN Control Plane Server to accept UE connections

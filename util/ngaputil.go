@@ -4,13 +4,13 @@ import (
 	"encoding/hex"
 	"strings"
 
-	"github.com/free5gc/ngap/ngapType"
+	"github.com/free5gc/ngap/ie"
 )
 
 // PlmnIdToNgap converts MCC and MNC strings to NGAP PLMNIdentity with proper BCD encoding
 // MCC is 3 digits, MNC is 2 or 3 digits
 // Example: MCC=208, MNC=93 -> hex "20f893" -> bytes {0x20, 0xf8, 0x93}
-func PlmnIdToNgap(mcc, mnc string) (ngapType.PLMNIdentity, error) {
+func PlmnIdToNgap(mcc, mnc string) (ie.PLMNIdentity, error) {
 	var hexString string
 	mccDigits := strings.Split(mcc, "")
 	mncDigits := strings.Split(mnc, "")
@@ -25,17 +25,17 @@ func PlmnIdToNgap(mcc, mnc string) (ngapType.PLMNIdentity, error) {
 
 	plmnBytes, err := hex.DecodeString(hexString)
 	if err != nil {
-		return ngapType.PLMNIdentity{}, err
+		return ie.PLMNIdentity{}, err
 	}
-	return ngapType.PLMNIdentity{Value: plmnBytes}, nil
+	return ie.PLMNIdentity{Value: plmnBytes}, nil
 }
 
 // TacToNgap converts TAC hex string to NGAP TAC
 // Example: TAC="000001" -> bytes {0x00, 0x00, 0x01}
-func TacToNgap(tacHex string) (ngapType.TAC, error) {
+func TacToNgap(tacHex string) (ie.TAC, error) {
 	tacBytes, err := hex.DecodeString(tacHex)
 	if err != nil {
-		return ngapType.TAC{}, err
+		return ie.TAC{}, err
 	}
-	return ngapType.TAC{Value: tacBytes}, nil
+	return ie.TAC{Value: tacBytes}, nil
 }

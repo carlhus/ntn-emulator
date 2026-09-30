@@ -112,12 +112,12 @@ func main() {
 	uectx := ue.NewUEContext(supi, 1)
 
 	// Set authentication subscription from config
-	uectx.AuthenticationSubs = models.AuthenticationSubscription{
-		AuthenticationMethod:          models.AuthMethod__5_G_AKA,
+	uectx.AuthenticationSubs = models.Udr_DR_AuthenticationSubscription{
+		AuthenticationMethod:          models.Udr_DR_AuthMethod_5_G_AKA,
 		EncPermanentKey:               ueCfg.UE.AuthenticationSubscription.EncPermanentKey,
 		EncOpcKey:                     ueCfg.UE.AuthenticationSubscription.EncOpcKey,
 		AuthenticationManagementField: ueCfg.UE.AuthenticationSubscription.AuthenticationManagementField,
-		SequenceNumber: &models.SequenceNumber{
+		SequenceNumber: &models.Udr_DR_SequenceNumber{
 			Sqn: ueCfg.UE.AuthenticationSubscription.SequenceNumber,
 		},
 	}

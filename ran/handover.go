@@ -8,7 +8,7 @@ import (
 	"ntn-emulator/ran/gtp"
 	"ntn-emulator/ran/ngap"
 
-	"github.com/free5gc/ngap/ngapType"
+	"github.com/free5gc/ngap/ie"
 )
 
 // HandoverContext stores information needed during handover
@@ -20,7 +20,7 @@ type HandoverContext struct {
 	PDUSessionID uint8
 
 	// Network configuration
-	PLMNID   ngapType.PLMNIdentity
+	PLMNID   ie.PLMNIdentity
 	TAC      []byte // 3 bytes
 	NRCellID []byte // 5 bytes for 36-bit cell ID
 
@@ -133,7 +133,7 @@ func ExampleHandoverFlow() {
 		PDUSessionID: 10,
 
 		// Location of RAN-B
-		PLMNID:   ngapType.PLMNIdentity{Value: []byte{0x02, 0xf8, 0x39}},
+		PLMNID:   ie.PLMNIdentity{Value: []byte{0x02, 0xf8, 0x39}},
 		TAC:      []byte{0x00, 0x00, 0x11},             // RAN-B's TAC
 		NRCellID: []byte{0x00, 0x00, 0x00, 0x00, 0x20}, // RAN-B's Cell ID
 

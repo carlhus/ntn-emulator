@@ -3,9 +3,9 @@ package ngap
 import (
 	"fmt"
 
-	"github.com/free5gc/aper"
-	"github.com/free5gc/ngap"
-	"github.com/free5gc/ngap/ngapType"
+	"github.com/free5gc/ngap/aper"
+	"github.com/free5gc/ngap/ie"
+	"github.com/free5gc/ngap/message"
 )
 
 // NGSetupHandler handles NG Setup procedure with AMF
@@ -48,18 +48,14 @@ func (h *NGSetupHandler) PerformNGSetup() error {
 	}
 
 	// Decode NG Setup Response
-	ngapPdu, err := ngap.Decoder(recvBuf[:n])
+	ngapPdu, err := message.Parse(recvBuf[:n])
 	if err != nil {
 		return fmt.Errorf("failed to decode NG Setup Response: %w", err)
 	}
 
 	// Verify it's a successful response
-	if ngapPdu.Present != ngapType.NGAPPDUPresentSuccessfulOutcome {
-		return fmt.Errorf("NG Setup failed: unexpected NGAP PDU type %d", ngapPdu.Present)
-	}
-
-	if ngapPdu.SuccessfulOutcome.ProcedureCode.Value != ngapType.ProcedureCodeNGSetup {
-		return fmt.Errorf("NG Setup failed: unexpected procedure code %d", ngapPdu.SuccessfulOutcome.ProcedureCode.Value)
+	if _, ok := ngapPdu.(*message.NGSetupResponse); !ok {
+		return fmt.Errorf("NG Setup failed: unexpected NGAP message %T", ngapPdu)
 	}
 
 	return nil
@@ -67,105 +63,41 @@ func (h *NGSetupHandler) PerformNGSetup() error {
 
 // buildNGSetupRequest builds an NG Setup Request NGAP message
 func (h *NGSetupHandler) buildNGSetupRequest() ([]byte, error) {
-	// Create NGAP PDU
-	pdu := ngapType.NGAPPDU{
-		Present: ngapType.NGAPPDUPresentInitiatingMessage,
-		InitiatingMessage: &ngapType.InitiatingMessage{
-			ProcedureCode: ngapType.ProcedureCode{
-				Value: ngapType.ProcedureCodeNGSetup,
-			},
-			Criticality: ngapType.Criticality{
-				Value: ngapType.CriticalityPresentReject,
-			},
-			Value: ngapType.InitiatingMessageValue{
-				Present: ngapType.InitiatingMessagePresentNGSetupRequest,
-				NGSetupRequest: &ngapType.NGSetupRequest{
-					ProtocolIEs: ngapType.ProtocolIEContainerNGSetupRequestIEs{
-						List: []ngapType.NGSetupRequestIEs{},
-					},
-				},
-			},
+	ngSetupRequest := &message.NGSetupRequest{
+		// Global RAN Node ID
+		GlobalRANNodeID: h.buildGlobalRANNodeID(),
+		// Supported TA List
+		SupportedTAList: h.buildSupportedTAList(),
+		// Default Paging DRX
+		DefaultPagingDRX: &ie.PagingDRX{
+			Value: ie.PagingDRXPresentV128,
 		},
 	}
-
-	// Add Global RAN Node ID
-	globalRANNodeID := h.buildGlobalRANNodeID()
-	pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List = append(
-		pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List,
-		ngapType.NGSetupRequestIEs{
-			Id:          ngapType.ProtocolIEID{Value: ngapType.ProtocolIEIDGlobalRANNodeID},
-			Criticality: ngapType.Criticality{Value: ngapType.CriticalityPresentReject},
-			Value: ngapType.NGSetupRequestIEsValue{
-				Present:         ngapType.NGSetupRequestIEsPresentGlobalRANNodeID,
-				GlobalRANNodeID: &globalRANNodeID,
-			},
-		},
-	)
 
 	// Add RAN Node Name (optional, but useful for NTN identification)
 	if h.gnbName != "" {
-		pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List = append(
-			pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List,
-			ngapType.NGSetupRequestIEs{
-				Id:          ngapType.ProtocolIEID{Value: ngapType.ProtocolIEIDRANNodeName},
-				Criticality: ngapType.Criticality{Value: ngapType.CriticalityPresentIgnore},
-				Value: ngapType.NGSetupRequestIEsValue{
-					Present: ngapType.NGSetupRequestIEsPresentRANNodeName,
-					RANNodeName: &ngapType.RANNodeName{
-						Value: h.gnbName,
-					},
-				},
-			},
-		)
+		ngSetupRequest.RANNodeName = &ie.RANNodeName{
+			Value: aper.PrintableString(h.gnbName),
+		}
 	}
-
-	// Add Supported TA List
-	supportedTAList := h.buildSupportedTAList()
-	pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List = append(
-		pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List,
-		ngapType.NGSetupRequestIEs{
-			Id:          ngapType.ProtocolIEID{Value: ngapType.ProtocolIEIDSupportedTAList},
-			Criticality: ngapType.Criticality{Value: ngapType.CriticalityPresentReject},
-			Value: ngapType.NGSetupRequestIEsValue{
-				Present:         ngapType.NGSetupRequestIEsPresentSupportedTAList,
-				SupportedTAList: &supportedTAList,
-			},
-		},
-	)
-
-	// Add Default Paging DRX
-	defaultPagingDRX := ngapType.PagingDRX{
-		Value: ngapType.PagingDRXPresentV128,
-	}
-	pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List = append(
-		pdu.InitiatingMessage.Value.NGSetupRequest.ProtocolIEs.List,
-		ngapType.NGSetupRequestIEs{
-			Id:          ngapType.ProtocolIEID{Value: ngapType.ProtocolIEIDDefaultPagingDRX},
-			Criticality: ngapType.Criticality{Value: ngapType.CriticalityPresentIgnore},
-			Value: ngapType.NGSetupRequestIEsValue{
-				Present:          ngapType.NGSetupRequestIEsPresentDefaultPagingDRX,
-				DefaultPagingDRX: &defaultPagingDRX,
-			},
-		},
-	)
 
 	// Encode the PDU
-	return ngap.Encoder(pdu)
+	return ngSetupRequest.MarshalBinary()
 }
 
 // buildGlobalRANNodeID builds the Global RAN Node ID
-func (h *NGSetupHandler) buildGlobalRANNodeID() ngapType.GlobalRANNodeID {
-	return ngapType.GlobalRANNodeID{
-		Present: ngapType.GlobalRANNodeIDPresentGlobalGNBID,
-		GlobalGNBID: &ngapType.GlobalGNBID{
-			PLMNIdentity: ngapType.PLMNIdentity{
+func (h *NGSetupHandler) buildGlobalRANNodeID() *ie.GlobalRANNodeID {
+	return &ie.GlobalRANNodeID{
+		Choice: &ie.GlobalGNBID{
+			PLMNIdentity: &ie.PLMNIdentity{
 				Value: aper.OctetString("\x02\xf8\x39"), // MCC=208, MNC=93 (correct encoding)
 			},
-			GNBID: ngapType.GNBID{
-				Present: ngapType.GNBIDPresentGNBID,
-				GNBID: &aper.BitString{
-					Bytes:     h.gnbID,
-					BitLength: uint64(len(h.gnbID) * 8),
+			GNBID: &ie.GNBID{
+				Choice: &ie.GNBIDForGNBID{
+					Value: aper.BitString{
+						Bytes:     h.gnbID,
+						BitLength: uint64(len(h.gnbID) * 8),
+					},
 				},
 			},
 		},
@@ -173,19 +105,19 @@ func (h *NGSetupHandler) buildGlobalRANNodeID() ngapType.GlobalRANNodeID {
 }
 
 // buildSupportedTAList builds the Supported TA List
-func (h *NGSetupHandler) buildSupportedTAList() ngapType.SupportedTAList {
-	broadcastPLMN := ngapType.BroadcastPLMNItem{
-		PLMNIdentity: ngapType.PLMNIdentity{
+func (h *NGSetupHandler) buildSupportedTAList() *ie.SupportedTAList {
+	broadcastPLMN := ie.BroadcastPLMNItem{
+		PLMNIdentity: &ie.PLMNIdentity{
 			Value: aper.OctetString("\x02\xf8\x39"), // MCC=208, MNC=93 (correct encoding)
 		},
-		TAISliceSupportList: ngapType.SliceSupportList{
-			List: []ngapType.SliceSupportItem{
+		TAISliceSupportList: &ie.SliceSupportList{
+			List: []ie.SliceSupportItem{
 				{
-					SNSSAI: ngapType.SNSSAI{
-						SST: ngapType.SST{
+					SNSSAI: &ie.SNSSAI{
+						SST: &ie.SST{
 							Value: aper.OctetString("\x01"),
 						},
-						SD: &ngapType.SD{
+						SD: &ie.SD{
 							Value: aper.OctetString("\x01\x02\x03"),
 						},
 					},
@@ -194,14 +126,14 @@ func (h *NGSetupHandler) buildSupportedTAList() ngapType.SupportedTAList {
 		},
 	}
 
-	return ngapType.SupportedTAList{
-		List: []ngapType.SupportedTAItem{
+	return &ie.SupportedTAList{
+		List: []ie.SupportedTAItem{
 			{
-				TAC: ngapType.TAC{
+				TAC: &ie.TAC{
 					Value: aper.OctetString{uint8(h.tac >> 16), uint8(h.tac >> 8), uint8(h.tac)},
 				},
-				BroadcastPLMNList: ngapType.BroadcastPLMNList{
-					List: []ngapType.BroadcastPLMNItem{broadcastPLMN},
+				BroadcastPLMNList: &ie.BroadcastPLMNList{
+					List: []ie.BroadcastPLMNItem{broadcastPLMN},
 				},
 			},
 		},
