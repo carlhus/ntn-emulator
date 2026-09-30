@@ -2,7 +2,7 @@
 
 # State monitoring
 state:
-  file: "/home/ntn/ntn-emulator/ntn_state.json"
+  file: "/home/ubuntu/ntn-emulator/ntn_state.json"
   poll_interval_ms: 100  # How often to check for updates
 
 # Delay Model

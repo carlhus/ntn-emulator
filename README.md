@@ -33,7 +33,7 @@ This repository implements:
 ### Build
 
 ```bash
-cd /home/ntn/ntn-emulator
+cd /home/ubuntu/ntn-emulator
 
 go mod tidy
 go mod download

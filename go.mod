@@ -3,22 +3,22 @@ module ntn-emulator
 go 1.25.5
 
 replace (
-	github.com/free-ran-ue/free-ran-ue/v2 => /home/ntn/free-ran-ue
-	github.com/free5gc/amf => /home/ntn/free5gc/NFs/amf
-	github.com/free5gc/ausf => /home/ntn/free5gc/NFs/ausf
-	github.com/free5gc/bsf => /home/ntn/free5gc/NFs/bsf
-	github.com/free5gc/chf => /home/ntn/free5gc/NFs/chf
-	github.com/free5gc/n3iwf => /home/ntn/free5gc/NFs/n3iwf
-	github.com/free5gc/nrf => /home/ntn/free5gc/NFs/nrf
-	github.com/free5gc/nssf => /home/ntn/free5gc/NFs/nssf
-	github.com/free5gc/pcf => /home/ntn/free5gc/NFs/pcf
-	github.com/free5gc/smf => /home/ntn/free5gc/NFs/smf
-	github.com/free5gc/tngf => /home/ntn/free5gc/NFs/tngf
-	github.com/free5gc/udm => /home/ntn/free5gc/NFs/udm
-	github.com/free5gc/udr => /home/ntn/free5gc/NFs/udr
-	github.com/free5gc/upf => /home/ntn/free5gc/NFs/upf
-	github.com/free5gc/webconsole => /home/ntn/free5gc/webconsole
-	test => /home/ntn/free5gc/test
+	github.com/free-ran-ue/free-ran-ue/v2 => /home/ubuntu/free-ran-ue
+	github.com/free5gc/amf => /home/ubuntu/free5gc/NFs/amf
+	github.com/free5gc/ausf => /home/ubuntu/free5gc/NFs/ausf
+	github.com/free5gc/bsf => /home/ubuntu/free5gc/NFs/bsf
+	github.com/free5gc/chf => /home/ubuntu/free5gc/NFs/chf
+	github.com/free5gc/n3iwf => /home/ubuntu/free5gc/NFs/n3iwf
+	github.com/free5gc/nrf => /home/ubuntu/free5gc/NFs/nrf
+	github.com/free5gc/nssf => /home/ubuntu/free5gc/NFs/nssf
+	github.com/free5gc/pcf => /home/ubuntu/free5gc/NFs/pcf
+	github.com/free5gc/smf => /home/ubuntu/free5gc/NFs/smf
+	github.com/free5gc/tngf => /home/ubuntu/free5gc/NFs/tngf
+	github.com/free5gc/udm => /home/ubuntu/free5gc/NFs/udm
+	github.com/free5gc/udr => /home/ubuntu/free5gc/NFs/udr
+	github.com/free5gc/upf => /home/ubuntu/free5gc/NFs/upf
+	github.com/free5gc/webconsole => /home/ubuntu/free5gc/webconsole
+	test => /home/ubuntu/free5gc/test
 )
 
 require (
